@@ -15,6 +15,7 @@ from .util import pin_list_to_board_dict, to_two_bytes, two_byte_iter_to_str, It
 DIGITAL_MESSAGE = 0x90      # send data for a digital pin
 ANALOG_MESSAGE = 0xE0       # send data for an analog pin (or PWM)
 DIGITAL_PULSE = 0x91        # SysEx command to send a digital pulse
+ULTRASONE_MESSAGE = 0xA0
 
 # PULSE_MESSAGE = 0xA0      # proposed pulseIn/Out msg (SysEx)
 # SHIFTOUT_MESSAGE = 0xB0   # proposed shiftOut msg (SysEx)
@@ -30,6 +31,8 @@ QUERY_FIRMWARE = 0x79       # query the firmware name
 # extended command set using sysex (0-127/0x00-0x7F)
 # 0x00-0x0F reserved for user-defined commands */
 
+SET_ULTRASONE_TRIG = 0x01   # a message with the trig pin number
+SET_ULTRASONE_ECHO = 0x02   # a message with the echo pin number
 EXTENDED_ANALOG = 0x6F          # analog write (PWM, Servo, etc) to any pin
 PIN_STATE_QUERY = 0x6D          # ask for a pin's current mode and value
 PIN_STATE_RESPONSE = 0x6E       # reply with pin's current mode and value
@@ -59,6 +62,8 @@ ANALOG = 2         # analog pin in analogInput mode
 PWM = 3            # digital pin in PWM output mode
 SERVO = 4          # digital pin in SERVO mode
 INPUT_PULLUP = 11  # Same as INPUT, but with the pin's internal pull-up resistor enabled
+ULTRASONE_TRIG = 12          # ultrasone trig pin
+ULTRASONE_ECHO = 13          # ultrasone echo pin
 
 # Pin types
 DIGITAL = OUTPUT   # same as OUTPUT below
@@ -194,6 +199,7 @@ class Board(object):
         # Setup default handlers for standard incoming commands
         self.add_cmd_handler(ANALOG_MESSAGE, self._handle_analog_message)
         self.add_cmd_handler(DIGITAL_MESSAGE, self._handle_digital_message)
+        self.add_cmd_handler(ULTRASONE_MESSAGE, self._handle_ultrasone_message)
         self.add_cmd_handler(REPORT_VERSION, self._handle_report_version)
         self.add_cmd_handler(REPORT_FIRMWARE, self._handle_report_firmware)
 
@@ -256,6 +262,8 @@ class Board(object):
                                         'p' for pwm (Pulse-width modulation)
                                         's' for servo
                                         'u' for input with pull-up resistor enabled
+                                        't' for trig pin
+                                        'e' for echo pin
 
         All seperated by ``:``.
         """
@@ -290,6 +298,10 @@ class Board(object):
                 pin.mode = INPUT
             elif bits[2] == 'o':
                 pin.mode = OUTPUT
+            elif bits[2] == 't':
+                pin.mode = ULTRASONE_TRIG
+            elif bits[2] == 'e':
+                pin.mode = ULTRASONE_ECHO
             else:
                 pin.mode = INPUT
         else:
@@ -385,6 +397,23 @@ class Board(object):
         self.digital[pin]._mode = SERVO
         self.digital[pin].write(angle)
 
+    # TODO: Do the ultrasone trig and echo config in a single function
+    def ultrasone_trig_config(self, pin):
+        """Configures a pin as the ultrasone sensor trig pin"""
+        if pin > len(self.digital) or self.digital[pin].mode == UNAVAILABLE:
+            raise IOError("Pin {0} is not a valid ultrasone trig pin".format(pin))
+        
+        data = bytearray([pin])
+        self.send_sysex(SET_ULTRASONE_TRIG, data)
+
+    def ultrasone_echo_config(self, pin):
+        """Configures a pin as the ultrasone sensor trig pin"""
+        if pin > len(self.digital) or self.digital[pin].mode == UNAVAILABLE:
+            raise IOError("Pin {0} is not a valid ultrasone trig pin".format(pin))
+        
+        data = bytearray([pin])
+        self.send_sysex(SET_ULTRASONE_ECHO, data)
+
     def setSamplingInterval(self, intervalInMs):
         data = to_two_bytes(int(intervalInMs))
         self.send_sysex(SAMPLING_INTERVAL, data)
@@ -425,6 +454,14 @@ class Board(object):
         mask = (msb << 7) + lsb
         try:
             self.digital_ports[port_nr]._update(mask)
+        except IndexError:
+            raise ValueError
+    
+    def _handle_ultrasone_message(self, alwaysZero, echo_pin_nr, distance):
+        try:
+            self.digital[echo_pin_nr].value = distance
+            if self.digital[echo_pin_nr].callback is not None:
+                self.digital[echo_pin_nr].callback(distance)
         except IndexError:
             raise ValueError
 
@@ -544,6 +581,10 @@ class Pin(object):
             self._mode = SERVO
             self.board.servo_config(self.pin_number)
             return
+        if mode == ULTRASONE_ECHO:
+            self.board.ultrasone_echo_config(self.pin_number)
+        elif mode == ULTRASONE_TRIG:
+            self.board.ultrasone_trig_config(self.pin_number)
 
         # Set mode with SET_PIN_MODE message
         self._mode = mode
@@ -599,7 +640,7 @@ class Pin(object):
         :arg value: callback with one argument which receives the data:
         boolean if the pin is digital, or 
         float from 0 to 1 if the pin is an analgoue input
-        """        
+        """
         self.callback = _callback
 
     def unregiser_callback(self):
